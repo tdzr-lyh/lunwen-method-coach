@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#3158b8">
+  <meta name="description" content="从零基础开始，按顺序领取论文方法学习任务。站内讲解、例题、自测与口述练习，帮助讲清外卖平台用户画像系统的每一种方法。">
+  <title>论文有方 · 方法学习任务站</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">跳到学习内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="#today" aria-label="论文有方任务大厅"><span class="brand-mark">论<span></span></span><span><strong>论文有方</strong><small>把方法讲成自己的话</small></span></a>
+    <div class="nav-caption">我的学习空间</div>
+    <nav class="navigation" aria-label="主要导航">
+      <a href="#today" data-nav="today"><span data-icon="home"></span><span>任务大厅</span></a>
+      <a href="#roadmap" data-nav="roadmap"><span data-icon="route"></span><span>学习路线</span><small id="courseCount">11</small></a>
+      <a href="#lab" data-nav="lab"><span data-icon="lab"></span><span>方法实验室</span></a>
+      <a href="#reviews" data-nav="reviews"><span data-icon="review"></span><span>错题复习</span><small id="mistakeCount" hidden>0</small></a>
+      <a href="#records" data-nav="records"><span data-icon="record"></span><span>学习记录</span></a>
+    </nav>
+    <section class="sidebar-goal"><span class="mini-label">这一轮的目标</span><p>从看懂论文<br>到独立讲清方法。</p><div class="goal-track"><span id="sideProgress"></span></div><small id="sideProgressText">准备领取第一组任务</small><a href="#reference">论文口径与资料 <span aria-hidden="true">↗</span></a></section>
+    <div class="local-status"><i></i><span id="saveLabel">进度保存在当前浏览器</span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><a href="#today" class="mobile-brand">论文有方</a><span id="breadcrumb">我的学习空间 <b>/</b> 任务大厅</span><div class="topbar-right"><span id="todayDate"></span><span class="edition">论文方法 · 2026.10</span></div></header>
+    <div id="storageNotice" class="storage-notice" role="status" hidden></div>
+    <main id="main" tabindex="-1"><div class="boot"><h1>正在整理你的学习任务…</h1><p>如果内容没有出现，请刷新页面或通过本地启动脚本打开。</p></div></main>
+    <footer class="footer"><span>一步一步，把论文里的方法讲明白。</span><a href="#reference">依据与口径 · 2026-10-23</a></footer>
+  </div>
+  <nav class="mobile-nav" aria-label="手机导航"><a href="#today" data-nav="today">任务</a><a href="#roadmap" data-nav="roadmap">路线</a><a href="#lab" data-nav="lab">实验室</a><a href="#reviews" data-nav="reviews">错题</a><a href="#records" data-nav="records">记录</a></nav>
+  <dialog id="dialog"><div id="dialogContent"></div><button class="dialog-close" aria-label="关闭弹窗" data-action="close-dialog">×</button></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <input type="file" id="importFile" accept="application/json,.json" hidden>
+  <noscript><p class="noscript">请启用 JavaScript 后学习和记录任务。本站不需要安装其他软件。</p></noscript>
+  <script src="./course-foundations.js"></script>
+  <script src="./course-methods.js"></script>
+  <script src="./model.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

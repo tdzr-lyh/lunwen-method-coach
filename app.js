@@ -32,6 +32,9 @@
   const taskNumber = task => String(tasks.findIndex(item => item.id === task.id) + 1).padStart(2, '0');
   let state, storageWarning = '', pendingImport = null, toastTimer, activeLab = 'features';
   let recoveryRaw = null, startupRaw = null;
+  let guestState = null, cloud = null, accountUser = null, cloudBootPending = false;
+  let cloudKind = 'connecting', cloudMessage = '正在连接云同步…', cloudTimer = null, cloudConflict = null;
+  let authMode = 'signin', authBusy = false;
   let lastCompleted = null, glossaryQuery = '', clusterStep = 0;
   let featureInputs = {last:'2024-12-28',reference:'2025-01-02',frequency:'5',monetary:'1000',click:'50',cart:'15'};
   let matrixInputs = {tp:'1855',fp:'3332',fn:'138',tn:'14410'};
@@ -45,11 +48,97 @@
     recoveryRaw = startupRaw;
     storageWarning = `未能恢复本机记录：${error.message}。原记录未被自动覆盖，请先在学习记录页导出待检查记录；确认后再继续学习。`;
   }
+  if (state) guestState = M.normalizeState(state, tasks);
   function persist(next) {
+    if (cloudBootPending) throw new Error('正在恢复账号的云端记录，请稍等再修改。');
     state = next;
-    try {localStorage.setItem(KEY, JSON.stringify(state)); storageWarning = '';}
-    catch (_) {storageWarning = '当前浏览器无法保存进度。此次操作暂存在页面内，关闭后可能丢失；请到学习记录页导出备份。';}
+    if (accountUser && cloud) {
+      cloud.stage(state);
+      clearTimeout(cloudTimer);
+      cloudTimer = setTimeout(() => { void cloud.pull(); }, 400);
+    } else {
+      guestState = M.normalizeState(state, tasks);
+      try {localStorage.setItem(KEY, JSON.stringify(state)); storageWarning = '';}
+      catch (_) {storageWarning = '当前浏览器无法保存进度。此次操作暂存在页面内，关闭后可能丢失；请到学习记录页导出备份。';}
+    }
     updateChrome();
+  }
+  function hasProgress(value) { return !!value && Object.keys(value.tasks || {}).length > 0; }
+  function legacyHandled() {
+    try { return !!accountUser && localStorage.getItem(KEY + ':legacy-handled:' + accountUser.id) === '1'; }
+    catch (_) { return false; }
+  }
+  function markLegacyHandled() {
+    if (!accountUser) return;
+    try { localStorage.setItem(KEY + ':legacy-handled:' + accountUser.id, '1'); } catch (_) { /* optional reminder */ }
+  }
+  function updateCloudUI() {
+    const accountLabel = document.getElementById('accountLabel');
+    if (accountLabel) accountLabel.textContent = accountUser ? accountUser.email || '我的账号' : '登录同步';
+    const saveLabel = document.getElementById('saveLabel');
+    const readyLabel = cloud?.current().hasRemote ? '已与云端同步' : '账号已连接';
+    if (saveLabel) saveLabel.textContent = accountUser ? ({ready:readyLabel,pending:'等待上传',syncing:'正在同步…',offline:'离线暂存',error:'同步未完成',conflict:'需要核对记录'}[cloudKind] || '正在恢复记录…') : '未登录，仅此设备保存';
+    const syncBadge = document.getElementById('syncBadge');
+    if (syncBadge) {
+      syncBadge.textContent = accountUser ? ({ready:cloud?.current().hasRemote?'已同步':'已连接',pending:'等待上传',syncing:'同步中',offline:'离线暂存',error:'同步失败',conflict:'待核对'}[cloudKind] || '恢复中') : '未登录';
+      syncBadge.className = 'sync-badge ' + cloudKind;
+      syncBadge.title = cloudMessage;
+    }
+    const dot = document.getElementById('syncDot');
+    if (dot) dot.className = ['offline','error','pending','conflict'].includes(cloudKind) ? (cloudKind === 'conflict' ? 'error' : cloudKind) : '';
+    const notice = document.getElementById('cloudNotice');
+    if (!notice) return;
+    let text = '', action = '', label = '';
+    if (!accountUser) {
+      text = '电脑、平板和手机共用同一份进度：请在每台设备登录同一个邮箱账号。'; action = 'account'; label = '登录同步';
+    } else if (cloudBootPending) {
+      text = '正在恢复账号的云端学习记录，请稍等。';
+    } else if (cloudKind === 'conflict') {
+      text = cloudMessage; action = 'sync-conflict'; label = '核对两份记录';
+    } else if (['offline','error'].includes(cloudKind)) {
+      text = cloudMessage; action = 'sync-now'; label = '重新同步';
+    } else if (hasProgress(guestState) && !legacyHandled()) {
+      const count = M.summary(guestState, tasks).completed;
+      text = `此设备还保留着登录前的学习记录（已完成 ${count} 组）。可以把这份原进度同步到当前账号。`;
+      action = 'adopt-local'; label = '同步本机原进度';
+    }
+    notice.hidden = !text;
+    notice.className = 'cloud-notice ' + cloudKind;
+    notice.innerHTML = text ? `<span>${esc(text)}</span>${action ? `<button class="btn small" data-action="${action}">${esc(label)}</button>` : ''}` : '';
+    const detail = document.getElementById('accountSyncStatus');
+    if (detail) detail.textContent = cloudMessage;
+  }
+  function applyCloudState(value) {
+    try {
+      state = value && Object.keys(value).length ? M.normalizeState(value, tasks) : M.freshState();
+      cloudBootPending = false; lastCompleted = null;
+      render(false);
+    } catch (_) {
+      cloudKind = 'error'; cloudMessage = '云端记录格式暂时无法恢复，此设备原记录已保留，请导出备份后联系维护。';
+      updateCloudUI();
+    }
+  }
+  function startCloud() {
+    if (!globalThis.ThesisCloud?.CloudSync) {
+      cloudKind = 'error'; cloudMessage = '云同步文件未能加载，请刷新页面重试。'; updateCloudUI(); return;
+    }
+    cloud = new globalThis.ThesisCloud.CloudSync({
+      validateState: value => M.normalizeState(value, tasks),
+      onAuth(user, snapshot) {
+        accountUser = user; cloudConflict = null; lastCompleted = null;
+        cloudBootPending = !!user && !snapshot?.state;
+        state = user ? (snapshot?.state ? M.normalizeState(snapshot.state, tasks) : M.freshState()) : M.normalizeState(guestState || M.freshState(), tasks);
+        render(false);
+      },
+      onRemote: applyCloudState,
+      onStatus(kind, message) {
+        cloudKind = kind; cloudMessage = message;
+        if (['ready','offline','error','conflict','signed-out','local'].includes(kind)) cloudBootPending = false;
+        updateCloudUI();
+      },
+      onConflict(value) {cloudConflict = value; updateCloudUI();}
+    });
+    void cloud.init();
   }
   function toast(text) {
     const box = document.getElementById('toast'); box.textContent = text; box.hidden = false;
@@ -70,6 +159,7 @@
     document.querySelectorAll('[data-nav]').forEach(a => {const on = a.dataset.nav === nav; a.classList.toggle('active', on); if(on) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current');});
     const labels = {today:'任务大厅',roadmap:'学习路线',lab:'方法实验室',reviews:'错题复习',records:'学习记录',reference:'论文口径与资料',task:'当前学习任务'};
     document.getElementById('breadcrumb').innerHTML = `我的学习空间 <b>/</b> ${labels[route] || '任务大厅'}`;
+    updateCloudUI();
   }
   function heading(kicker, title, description, aside='') {return `<div class="page-heading"><div><div class="overline">${esc(kicker)}</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${aside ? `<div class="heading-note">${aside}</div>` : ''}</div>`;}
   function go(hash) {if(location.hash === hash) render(); else location.hash = hash;}
@@ -131,7 +221,7 @@
   function dateText(value) {if(!value)return '未记录';try{return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value));}catch(_){return '未记录';}}
   function recordsPage() {
     const s=M.summary(state,tasks),started=tasks.filter(t=>record(t.id));
-    return heading('每一组理解，都留得下来','回看你已经走过的路。','任务、答案、笔记保存在当前浏览器。换设备或清理浏览器前，请先导出备份。')+`<div class="record-summary"><div class="paper record-stat"><span>已完成任务</span><strong>${s.completed}<small> / ${s.total}</small></strong></div><div class="paper record-stat"><span>学习进度</span><strong>${s.percent}<small>%</small></strong></div><div class="paper record-stat"><span>待订正错题</span><strong>${s.mistakes}</strong></div></div>`+(started.length?`<section class="paper table-wrap"><table class="records-table"><thead><tr><th>任务</th><th>状态</th><th>最近自测</th><th>笔记</th><th>最近更新</th></tr></thead><tbody>${started.slice().reverse().map(t=>{const r=record(t.id);return `<tr><td><a href="#task/${t.id}/learn">${taskNumber(t)} · ${esc(t.title)}</a></td><td><span class="pill ${done(t.id)?'':'gold'}">${done(t.id)?'已完成':'进行中'}</span></td><td>${r.grade?`${r.grade.correct} / ${r.grade.total}`:'尚未检查'}</td><td>${r.notes?'已保存':'未填写'}</td><td>${dateText(r.updatedAt||r.completedAt||r.claimedAt)}</td></tr>`;}).join('')}</tbody></table></section>`:empty('第一条学习记录，等你开启','领取任务后，就会在这里保存进度、自测和笔记。','领取第一组','#today'))+`<section class="paper backup-panel"><h2>学习备份</h2><p>备份包含任务进度、答题和笔记，可在另一台设备的本站导入。导入会替换当前记录，先导出一份更稳妥。</p><div class="backup-actions"><button class="btn" data-action="export">${icon('download',17)}导出备份</button><button class="btn" data-action="import">导入备份</button><button class="text-button" data-action="export-oral">导出口述笔记</button>${recoveryRaw?'<button class="text-button" data-action="export-recovery">导出无法恢复的原记录</button>':''}</div></section>`;
+    return heading('每一组理解，都留得下来','回看你已经走过的路。',accountUser ? '任务、答案、笔记和错题自动同步到当前账号；其他设备登录同一邮箱即可恢复。' : '本机原记录仍保留。登录同步账号后，可以把进度带到电脑、平板和手机。')+`<div class="record-summary"><div class="paper record-stat"><span>已完成任务</span><strong>${s.completed}<small> / ${s.total}</small></strong></div><div class="paper record-stat"><span>学习进度</span><strong>${s.percent}<small>%</small></strong></div><div class="paper record-stat"><span>待订正错题</span><strong>${s.mistakes}</strong></div></div>`+(started.length?`<section class="paper table-wrap"><table class="records-table"><thead><tr><th>任务</th><th>状态</th><th>最近自测</th><th>笔记</th><th>最近更新</th></tr></thead><tbody>${started.slice().reverse().map(t=>{const r=record(t.id);return `<tr><td><a href="#task/${t.id}/learn">${taskNumber(t)} · ${esc(t.title)}</a></td><td><span class="pill ${done(t.id)?'':'gold'}">${done(t.id)?'已完成':'进行中'}</span></td><td>${r.grade?`${r.grade.correct} / ${r.grade.total}`:'尚未检查'}</td><td>${r.notes?'已保存':'未填写'}</td><td>${dateText(r.updatedAt||r.completedAt||r.claimedAt)}</td></tr>`;}).join('')}</tbody></table></section>`:empty('第一条学习记录，等你开启','领取任务后，就会在这里保存进度、自测和笔记。','领取第一组','#today'))+`<section class="paper backup-panel"><h2>学习备份</h2><p>备份包含任务进度、答题和笔记，可在另一台设备的本站导入。导入会替换当前记录，先导出一份更稳妥。</p><div class="backup-actions"><button class="btn" data-action="export">${icon('download',17)}导出备份</button><button class="btn" data-action="import">导入备份</button><button class="text-button" data-action="export-oral">导出口述笔记</button>${recoveryRaw?'<button class="text-button" data-action="export-recovery">导出无法恢复的原记录</button>':''}</div></section>`;
   }
   function labPage(tab) {
     if(['features','cluster','metrics','glossary','exam'].includes(tab))activeLab=tab;
@@ -187,7 +277,7 @@
     return `<div class="notice green">先不展开答案，按题目脱稿说。综合口述不自动评分，也不会改变已经完成的任务。</div><div class="exam-prompts">${exams.map(e=>`<details><summary>${esc(e[0])}</summary><p>${esc(e[1])}</p></details>`).join('')}</div><div class="action-line" style="margin-top:23px"><button class="btn" data-action="export-oral">${icon('download')}导出口述笔记</button><a class="text-button" href="#roadmap">按薄弱点回看模块 ↗</a></div>`;
   }
   function referencePage() {
-    return heading('核对事实，再把方法讲清楚','论文口径与学习依据','依据2026年10月23日核查的论文、当前代码和已有实验产物组织。本文档修改时间不代表每一章已经同步。')+`<article class="paper reference-body"><h2>这份学习站依据什么</h2><p>主要范围来自《外卖平台用户画像系统的设计与实现》最新“摘要一页版”Word，并结合完整初稿、方法全集、入门指南、模拟答辩问答与当前代码、特征文件、聚类和分类实验产物核对。站内“教学例子”只用来帮助理解，不冒充原始样本或新的实验结果。</p><h2>先学会完整的数据流</h2><p>98,673条、16字段用户级汇总记录 → 质量检查 → 14列特征表 → 8维聚类 / 另一套风险分类输入 → 群体、规则标签和分数 → SQLite结果库 → 网站查询与解释。聚类标签不直接作为风险模型输入。</p><h2>最新Word部分正文还需纠正</h2><ul><li><b>数据库：</b>当前SQLite包含9张实体表，user_profile_view是37列预合并实体表，并非SQL视图。MySQL文件只是6表结构参考，尚未完成连接验证。</li><li><b>测试：</b>当前独立复核为21项基础检查和50项附加核对；部分正文仍沿用历史21项与旧耗时。当前客户端平均计时约2.653—902.333ms，不代表公网或并发性能。</li><li><b>泄漏历史：</b>学习时说明为何排除R、生命周期及相关派生字段即可，不把缺少保存产物支持的早期“AUC接近1”背成已核实结论。</li><li><b>数据含义：</b>累计行为比值没有逐次事件匹配，不能直接视为真实转化概率；群体业务名称也不证明未来行为稳定。</li></ul><h2>三组最重要的区别</h2><ul><li><b>规则、分类与展示：</b>R≥72天构造9,965个规则正类；0.5为分类评估阈值；0.4和0.7用于页面三级风险。网页高风险12,379人来自全量重训后的分数，与规则正类人数含义不同。</li><li><b>局部稀疏与中心距离：</b>第20近邻距离的ε约0.806672，标记8,293名低密度离群用户；固定最终中心的半径分析是补充描述，未按新半径重新训练。</li><li><b>采用与最优：</b>组合K-Means以DB、ARI改善换取部分其他指标损失；AdaBoost按项目综合规则采用，旋转森林仍是重要对照，二者都没有“所有指标全面最好”的结论。</li></ul><h2>网站版本与学习记录</h2><p>原分析系统本机版使用Flask、Jinja2、SQLite与ECharts；项目提供的GitHub Pages版将结果导出成HTML和JSON，使用浏览器JavaScript读取分片。当前学习站独立保存进度，不读取或修改原雅思网站和论文计划站的学习记录。</p><p>学习记录保存在当前浏览器，不随ChatGPT账号自动同步。需要换浏览器、换设备或清理数据时，请从“学习记录”导出并在另一端导入备份。自测为固定答案判分，口述由你自行核对，不声称有AI自动口述评分。</p><h2>可查阅的官方解释</h2><ul><li><a href="https://scikit-learn.org/stable/modules/clustering.html" target="_blank" rel="noopener">scikit-learn：K-Means、聚类评价与层次聚类</a></li><li><a href="https://scikit-learn.org/stable/modules/ensemble.html" target="_blank" rel="noopener">scikit-learn：随机森林与AdaBoost等集成方法</a></li><li><a href="https://scikit-learn.org/stable/common_pitfalls.html" target="_blank" rel="noopener">scikit-learn：预处理和数据泄漏</a></li><li><a href="https://flask.palletsprojects.com/" target="_blank" rel="noopener">Flask：请求、路由和模板</a></li><li><a href="https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages" target="_blank" rel="noopener">GitHub：静态网站托管</a></li></ul><p>项目特定权重、阈值与模型取舍依据本项目代码和实验记录；不能把它们说成上述官方文档规定的通用最优参数。</p><div class="action-line" style="margin-top:24px"><a class="btn primary" href="#today">回到任务大厅${icon('arrow')}</a><a class="btn" href="https://tdzr-lyh.github.io/takeaway-user-portrait/" target="_blank" rel="noopener">打开原画像系统 ↗</a></div></article>`;
+    return heading('核对事实，再把方法讲清楚','论文口径与学习依据','依据2026年10月23日核查的论文、当前代码和已有实验产物组织。本文档修改时间不代表每一章已经同步。')+`<article class="paper reference-body"><h2>这份学习站依据什么</h2><p>主要范围来自《外卖平台用户画像系统的设计与实现》最新“摘要一页版”Word，并结合完整初稿、方法全集、入门指南、模拟答辩问答与当前代码、特征文件、聚类和分类实验产物核对。站内“教学例子”只用来帮助理解，不冒充原始样本或新的实验结果。</p><h2>先学会完整的数据流</h2><p>98,673条、16字段用户级汇总记录 → 质量检查 → 14列特征表 → 8维聚类 / 另一套风险分类输入 → 群体、规则标签和分数 → SQLite结果库 → 网站查询与解释。聚类标签不直接作为风险模型输入。</p><h2>最新Word部分正文还需纠正</h2><ul><li><b>数据库：</b>当前SQLite包含9张实体表，user_profile_view是37列预合并实体表，并非SQL视图。MySQL文件只是6表结构参考，尚未完成连接验证。</li><li><b>测试：</b>当前独立复核为21项基础检查和50项附加核对；部分正文仍沿用历史21项与旧耗时。当前客户端平均计时约2.653—902.333ms，不代表公网或并发性能。</li><li><b>泄漏历史：</b>学习时说明为何排除R、生命周期及相关派生字段即可，不把缺少保存产物支持的早期“AUC接近1”背成已核实结论。</li><li><b>数据含义：</b>累计行为比值没有逐次事件匹配，不能直接视为真实转化概率；群体业务名称也不证明未来行为稳定。</li></ul><h2>三组最重要的区别</h2><ul><li><b>规则、分类与展示：</b>R≥72天构造9,965个规则正类；0.5为分类评估阈值；0.4和0.7用于页面三级风险。网页高风险12,379人来自全量重训后的分数，与规则正类人数含义不同。</li><li><b>局部稀疏与中心距离：</b>第20近邻距离的ε约0.806672，标记8,293名低密度离群用户；固定最终中心的半径分析是补充描述，未按新半径重新训练。</li><li><b>采用与最优：</b>组合K-Means以DB、ARI改善换取部分其他指标损失；AdaBoost按项目综合规则采用，旋转森林仍是重要对照，二者都没有“所有指标全面最好”的结论。</li></ul><h2>网站版本与学习记录</h2><p>原分析系统本机版使用Flask、Jinja2、SQLite与ECharts；项目提供的GitHub Pages版将结果导出成HTML和JSON，使用浏览器JavaScript读取分片。当前学习站独立保存进度，不读取或修改原雅思网站和论文计划站的学习记录。</p><p>登录同一个邮箱同步账号后，任务、答案、笔记和错题会保存到云端；访客记录仍只保存在当前浏览器。首次登录可通过“同步本机原进度”上传已有记录。断网时暂存在此设备，恢复联网后核对版本并重试；两端同时修改时会提示核对，避免静默覆盖。仍可导出备份作为额外副本。自测为固定答案判分，口述由你自行核对，不声称有AI自动口述评分。</p><h2>可查阅的官方解释</h2><ul><li><a href="https://scikit-learn.org/stable/modules/clustering.html" target="_blank" rel="noopener">scikit-learn：K-Means、聚类评价与层次聚类</a></li><li><a href="https://scikit-learn.org/stable/modules/ensemble.html" target="_blank" rel="noopener">scikit-learn：随机森林与AdaBoost等集成方法</a></li><li><a href="https://scikit-learn.org/stable/common_pitfalls.html" target="_blank" rel="noopener">scikit-learn：预处理和数据泄漏</a></li><li><a href="https://flask.palletsprojects.com/" target="_blank" rel="noopener">Flask：请求、路由和模板</a></li><li><a href="https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages" target="_blank" rel="noopener">GitHub：静态网站托管</a></li></ul><p>项目特定权重、阈值与模型取舍依据本项目代码和实验记录；不能把它们说成上述官方文档规定的通用最优参数。</p><div class="action-line" style="margin-top:24px"><a class="btn primary" href="#today">回到任务大厅${icon('arrow')}</a><a class="btn" href="https://tdzr-lyh.github.io/takeaway-user-portrait/" target="_blank" rel="noopener">打开原画像系统 ↗</a></div></article>`;
   }
   function render(scroll=true) {
     if(!state||!M||tasks.length!==33){main.innerHTML='<section class="paper empty"><h1>课程文件尚未完整加载</h1><p>请刷新页面。如果离线使用，请确认四个JavaScript文件都在同一目录。</p></section>';return;}
@@ -199,6 +289,39 @@
     if(scroll){window.scrollTo({top:0,behavior:'instant'}); main.focus({preventScroll:true});if(name==='roadmap'&&route[1])document.getElementById(route[1])?.scrollIntoView({block:'start'});}
   }
   function showDialog(html) {document.getElementById('dialogContent').innerHTML=html;document.getElementById('dialog').showModal();}
+  function showAccount(mode = 'signin') {
+    authMode = mode;
+    if (accountUser) {
+      showDialog(`<section class="cloud-account"><h2>我的云同步账号</h2><div class="account-details"><p><b>${esc(accountUser.email || '已登录')}</b></p><p id="accountSyncStatus">${esc(cloudMessage)}</p></div><p>电脑、平板和手机登录同一个邮箱账号，任务、答案、笔记和错题会自动同步。</p><div class="action-line"><button class="btn primary" data-action="sync-now">立即同步</button><button class="btn" data-action="signout">退出账号</button></div>${hasProgress(guestState) && !legacyHandled()?'<p class="sync-help">此设备还保留登录前的原记录。</p><button class="text-button" data-action="adopt-local">核对并同步本机原进度 ↗</button>':''}</section>`);
+      return;
+    }
+    const signup = mode === 'signup';
+    showDialog(`<section class="cloud-account"><h2>${signup?'创建同步账号':'登录后，在任何设备接着学'}</h2><p>可使用雅思网站的同一邮箱账号登录。首次使用可以注册；各网站的学习记录分别保存。</p><div class="auth-switch"><button class="${signup?'':'active'}" data-action="auth-mode" data-mode="signin">登录</button><button class="${signup?'active':''}" data-action="auth-mode" data-mode="signup">注册</button></div><form class="auth-form" id="authForm"><label for="authEmail">邮箱</label><input id="authEmail" type="email" autocomplete="email" inputmode="email" required placeholder="请输入你的邮箱"><label for="authPassword">密码</label><input id="authPassword" type="password" autocomplete="${signup?'new-password':'current-password'}" minlength="6" required placeholder="${signup?'至少6位密码':'请输入账号密码'}"><div id="authStatus" class="auth-status" role="status"></div><button class="btn primary" id="authSubmit" type="submit">${signup?'注册同步账号':'登录并恢复云端进度'}</button></form><p class="sync-help">登录前的本机进度会保留。首次登录后，可以点击“同步本机原进度”上传电脑上已有的记录。</p></section>`);
+  }
+  function showLocalMigration() {
+    if (!accountUser || !cloud) {showAccount(); return;}
+    if (!hasProgress(guestState)) {toast('此设备没有需要迁移的登录前记录。'); return;}
+    const local = M.summary(guestState, tasks), remote = M.summary(state, tasks);
+    showDialog(`<h2>把电脑上原来的进度同步到账号</h2><p>当前账号：${esc(accountUser.email || '')}</p><div class="migration-grid"><div>此设备登录前的原记录<strong>${local.completed} / ${local.total}</strong>组已完成${guestState.activeTaskId?'，另有进行中任务':''}</div><div>当前账号记录<strong>${remote.completed} / ${remote.total}</strong>组已完成${state.activeTaskId?'，另有进行中任务':''}</div></div><p>${hasProgress(state)?'选择本机原进度后，将用这份记录替换当前账号记录。建议先导出当前账号备份。':'上传后，在平板或手机登录同一账号就能恢复这些任务和笔记。'}本机原记录也会保留。</p><div class="action-line"><button class="btn primary" data-action="adopt-confirm">把原进度同步到账号</button><button class="btn" data-action="export">导出当前账号备份</button><button class="text-button" data-action="keep-account">继续使用当前账号记录</button></div>`);
+  }
+  function showConflict() {
+    if (!cloudConflict) {void cloud?.pull(); return;}
+    const local = M.summary(cloudConflict.local || M.freshState(), tasks);
+    let remote;
+    try {remote = M.summary(cloudConflict.remote ? M.normalizeState(cloudConflict.remote, tasks) : M.freshState(), tasks);}
+    catch (_) {toast('另一份记录暂时无法读取，请先导出此设备备份。');return;}
+    showDialog(`<h2>两台设备同时修改了进度</h2><p>系统没有自动覆盖任何一份。请核对后选择接下来使用的记录。</p><div class="migration-grid"><div>此设备草稿<strong>${local.completed} / ${local.total}</strong>组已完成<br><button class="text-button" data-action="export-conflict" data-choice="local">导出这份备份</button></div><div>另一设备的云端记录<strong>${remote.completed} / ${remote.total}</strong>组已完成<br><button class="text-button" data-action="export-conflict" data-choice="remote">导出这份备份</button></div></div><p>选择后会以选中的整份记录继续同步。如两份都含有重要笔记，请先分别导出备份。</p><div class="action-line"><button class="btn primary" data-action="resolve-conflict" data-choice="remote">使用云端记录</button><button class="btn" data-action="resolve-conflict" data-choice="local">保留此设备记录</button></div>`);
+  }
+  function authError(error) {
+    const message = String(error?.message || error);
+    if (/invalid login|invalid credentials/i.test(message)) return '邮箱或密码不匹配，请核对后再试。';
+    if (/email not confirmed/i.test(message)) return '请先完成邮箱验证，再回到本站登录。';
+    if (/already registered|already exists/i.test(message)) return '这个邮箱已经注册，请切换到登录。';
+    if (/rate|too many|over_email/i.test(message)) return '尝试次数较多，请稍后再试；已有雅思账号可直接切换到登录。';
+    if (/password/i.test(message)) return '请使用至少6位密码，并满足账号服务的密码要求。';
+    if (/fetch|network|connection|timeout/i.test(message)) return '暂时无法连接账号服务，请检查网络后重试。此设备原进度仍保留。';
+    return '账号操作未完成，请核对邮箱、密码和邮箱验证状态后重试。';
+  }
   function download(name, text, type) {const url=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   function exportBackup() {
     download(`论文有方-学习备份-${new Date().toISOString().slice(0,10)}.json`,JSON.stringify(state,null,2),'application/json;charset=utf-8');toast('学习备份已导出，请妥善保存。');
@@ -207,7 +330,7 @@
     const text=['# 论文方法口述笔记','',`导出时间：${new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'long'}).format(new Date())}`,'','口述由本人自检；自测记录不等同于真实答辩表现。','',...tasks.filter(t=>record(t.id)).flatMap(t=>{const r=record(t.id);return [`## 第${taskNumber(t)}组 ${t.title}`,`状态：${done(t.id)?'已完成':'进行中'}；自测：${r.grade?`${r.grade.correct}/${r.grade.total}`:'尚未检查'}`,'',`口述题目：${t.oral.prompt}`,'','我的笔记：',r.notes||'（未填写）','','核对要点：',...t.oral.checklist.map((x,i)=>`- [${r.oralChecks?.[i]?'x':' '}] ${x}`),''];})].join('\n');
     download('论文有方-我的口述笔记.md',text,'text/markdown;charset=utf-8');toast('口述笔记已导出。');
   }
-  document.addEventListener('click',event=>{
+  document.addEventListener('click',async event=>{
     const button=event.target.closest('[data-action]');if(!button)return;
     const action=button.dataset.action,id=button.dataset.id;
     try {
@@ -223,6 +346,37 @@
       else if(action==='export')exportBackup();
       else if(action==='export-recovery'&&recoveryRaw)download('论文有方-待检查原记录.json',recoveryRaw,'application/json;charset=utf-8');
       else if(action==='export-oral')exportOral();
+      else if(action==='account')showAccount();
+      else if(action==='auth-mode')showAccount(button.dataset.mode);
+      else if(action==='sync-now'){
+        if (!accountUser) showAccount();
+        else {await cloud.pull();updateCloudUI();if(cloudKind==='ready')toast('已核对云端记录。');}
+      }
+      else if(action==='adopt-local')showLocalMigration();
+      else if(action==='adopt-confirm'){
+        if(!accountUser||!cloud)throw new Error('请先登录同步账号。');
+        persist(M.normalizeState(guestState,tasks));
+        document.getElementById('dialog').close();render(false);
+        await cloud.pull();
+        if(!cloud.current().dirty&&!cloud.current().conflict&&cloud.current().hasRemote){markLegacyHandled();updateCloudUI();toast('本机原进度已同步，其他设备登录同一账号即可恢复。');}
+      }
+      else if(action==='keep-account'){markLegacyHandled();document.getElementById('dialog').close();updateCloudUI();}
+      else if(action==='sync-conflict')showConflict();
+      else if(action==='export-conflict'&&cloudConflict){
+        const selected=button.dataset.choice==='local'?cloudConflict.local:cloudConflict.remote;
+        download(`论文有方-${button.dataset.choice==='local'?'本机':'云端'}冲突备份.json`,JSON.stringify(selected||M.freshState(),null,2),'application/json;charset=utf-8');
+      }
+      else if(action==='resolve-conflict'){
+        const choice=button.dataset.choice;
+        await cloud.resolveConflict(choice);cloudConflict=cloud.current().conflict?cloudConflict:null;
+        document.getElementById('dialog').close();render(false);
+        if(cloudKind==='ready')toast('已按选择继续同步。');
+      }
+      else if(action==='signout'){
+        if(cloud.current().dirty){showDialog('<h2>此设备还有等待上传的记录</h2><p>可以先尝试同步。若现在退出，草稿仍绑定此账号保存在本设备，下次登录后可继续上传。</p><div class="action-line"><button class="btn primary" data-action="sync-now">先同步</button><button class="btn" data-action="signout-confirm">保留草稿并退出</button></div>');}
+        else {await cloud.signOut();document.getElementById('dialog').close();render(false);toast('已退出账号，云端记录仍保留。');}
+      }
+      else if(action==='signout-confirm'){await cloud.signOut();document.getElementById('dialog').close();render(false);toast('已退出，未上传草稿保留在此设备。');}
       else if(action==='import')document.getElementById('importFile').click();
       else if(action==='confirm-import'){if(!pendingImport)return;persist(pendingImport);pendingImport=null;lastCompleted=null;document.getElementById('dialog').close();render();toast('备份已导入，任务与笔记已恢复。');}
       else if(action==='close-dialog'){pendingImport=null;document.getElementById('dialog').close();}
@@ -246,16 +400,36 @@
       if(el.id==='glossarySearch'){const position=el.selectionStart;glossaryQuery=el.value;document.getElementById('labContent').innerHTML=glossaryLab();const input=document.getElementById('glossarySearch');input.focus({preventScroll:true});input.setSelectionRange(position,position);}
     }catch(error){toast(error.message);}
   });
-  document.addEventListener('submit',event=>{
+  document.addEventListener('submit',async event=>{
+    if(event.target.id==='authForm'){
+      event.preventDefault();if(authBusy)return;
+      const email=document.getElementById('authEmail').value.trim(),password=document.getElementById('authPassword').value;
+      const status=document.getElementById('authStatus'),submit=document.getElementById('authSubmit');
+      if(!cloud){status.textContent='云同步尚未连接，请刷新页面重试。';return;}
+      authBusy=true;submit.disabled=true;status.textContent='正在连接账号…';
+      try {
+        const result=await (authMode==='signup'?cloud.signUp(email,password):cloud.signIn(email,password));
+        if(result.confirmationRequired){status.textContent='请打开邮箱完成验证，再回到本站登录；已有本机进度仍然保留。';}
+        else {document.getElementById('dialog').close();render(false);toast('账号已连接，请在其他设备登录同一邮箱。');}
+      }catch(error){status.textContent=authError(error);}
+      finally{authBusy=false;submit.disabled=false;}
+      return;
+    }
     if(event.target.id!=='quizForm')return;event.preventDefault();
     try {const task=findTask(event.target.dataset.task),graded=M.gradeTask(state,task);persist(graded.state);const y=scrollY;render(false);window.scrollTo(0,y);toast(graded.result.passed?'这组自测全部答对，接下来练习口述。':`答对 ${graded.result.correct} / ${graded.result.total} 题，先看解析再订正。`);}catch(error){toast(error.message);}
   });
   document.getElementById('importFile').addEventListener('change',async event=>{
     const file=event.target.files[0];event.target.value='';if(!file)return;
-    try {if(file.size>3*1024*1024)throw new Error('备份文件超过3MB，请选择本站导出的JSON备份。');const raw=JSON.parse(await file.text());pendingImport=M.normalizeState(raw,tasks);const stats=M.summary(pendingImport,tasks);showDialog(`<h2>导入这份学习记录？</h2><p>已验证备份：完成 ${stats.completed} / ${stats.total} 组，${stats.mistakes} 道待订正错题。导入将替换当前浏览器的进度、答案和笔记。</p><div class="action-line"><button class="btn" data-action="export">先导出当前备份</button><button class="btn primary" data-action="confirm-import">确认导入</button></div>`);}catch(error){pendingImport=null;toast(`未导入：${error.message}`);}
+    try {if(file.size>3*1024*1024)throw new Error('备份文件超过3MB，请选择本站导出的JSON备份。');const raw=JSON.parse(await file.text());pendingImport=M.normalizeState(raw,tasks);const stats=M.summary(pendingImport,tasks);showDialog(`<h2>导入这份学习记录？</h2><p>已验证备份：完成 ${stats.completed} / ${stats.total} 组，${stats.mistakes} 道待订正错题。${accountUser?'导入将替换当前账号的记录，并同步到其他设备。':'导入将替换当前浏览器的进度、答案和笔记。'}</p><div class="action-line"><button class="btn" data-action="export">先导出当前备份</button><button class="btn primary" data-action="confirm-import">确认导入</button></div>`);}catch(error){pendingImport=null;toast(`未导入：${error.message}`);}
   });
   document.getElementById('dialog').addEventListener('cancel',()=>{pendingImport=null;});
   window.addEventListener('hashchange',()=>render());
-  window.addEventListener('storage',event=>{if(event.key!==KEY||!event.newValue)return;try{state=M.normalizeState(JSON.parse(event.newValue),tasks);render(false);toast('已同步此浏览器另一标签页的学习记录。');}catch(_){toast('另一标签页的记录无法读取，当前进度暂时保留。');}});
+  window.addEventListener('storage',event=>{
+    if(accountUser){if(event.key==='lunwen-method-coach:cloud:v1:'+accountUser.id)void cloud?.pull();return;}
+    if(event.key!==KEY||!event.newValue)return;
+    try{state=M.normalizeState(JSON.parse(event.newValue),tasks);guestState=M.normalizeState(state,tasks);render(false);toast('已同步此浏览器另一标签页的学习记录。');}
+    catch(_){toast('另一标签页的记录无法读取，当前进度暂时保留。');}
+  });
   render();
+  startCloud();
 })();

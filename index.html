@@ -22,11 +22,12 @@
       <a href="#records" data-nav="records"><span data-icon="record"></span><span>学习记录</span></a>
     </nav>
     <section class="sidebar-goal"><span class="mini-label">这一轮的目标</span><p>从看懂论文<br>到独立讲清方法。</p><div class="goal-track"><span id="sideProgress"></span></div><small id="sideProgressText">准备领取第一组任务</small><a href="#reference">论文口径与资料 <span aria-hidden="true">↗</span></a></section>
-    <div class="local-status"><i></i><span id="saveLabel">进度保存在当前浏览器</span></div>
+    <div class="local-status"><i id="syncDot"></i><span id="saveLabel">正在连接云同步…</span><button class="text-button" data-action="sync-now" aria-label="立即同步">↻</button></div>
   </aside>
   <div class="workspace">
-    <header class="topbar"><a href="#today" class="mobile-brand">论文有方</a><span id="breadcrumb">我的学习空间 <b>/</b> 任务大厅</span><div class="topbar-right"><span id="todayDate"></span><span class="edition">论文方法 · 2026.10</span></div></header>
+    <header class="topbar"><a href="#today" class="mobile-brand">论文有方</a><span id="breadcrumb">我的学习空间 <b>/</b> 任务大厅</span><div class="topbar-right"><span id="todayDate"></span><span id="syncBadge" class="sync-badge" role="status">未登录</span><button class="account-button" data-action="account"><span class="account-avatar" aria-hidden="true">我</span><span id="accountLabel">登录同步</span></button></div></header>
     <div id="storageNotice" class="storage-notice" role="status" hidden></div>
+    <div id="cloudNotice" class="cloud-notice" role="status" hidden></div>
     <main id="main" tabindex="-1"><div class="boot"><h1>正在整理你的学习任务…</h1><p>如果内容没有出现，请刷新页面或通过本地启动脚本打开。</p></div></main>
     <footer class="footer"><span>一步一步，把论文里的方法讲明白。</span><a href="#reference">依据与口径 · 2026-10-23</a></footer>
   </div>
@@ -38,6 +39,9 @@
   <script src="./course-foundations.js"></script>
   <script src="./course-methods.js"></script>
   <script src="./model.js"></script>
+  <script src="./cloud-config.js"></script>
+  <script src="./vendor/supabase.min.js"></script>
+  <script src="./cloud.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
